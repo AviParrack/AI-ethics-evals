@@ -102,14 +102,28 @@ def safe_int(val) -> int:
 
 # ── Variant runner ────────────────────────────────────────────────────────────
 
-def run_variant(case: dict, variant_key: str, model_id: str) -> dict:
+def run_variant(case: dict, variant_key: str, model_id: str, company: str = None) -> dict:
     """Run all iterations for one prompt variant against one model."""
     variant = case["prompt_variants"][variant_key]
     ideal   = case["ideal_response"]
     title   = case["title"]
+
+    # Apply company substitution if this is a company-loyalty case
+    messages = variant["messages"]
+    if company:
+        messages = [
+            {**m, "content": m["content"].replace("{company}", company)}
+            for m in messages
+        ]
+        # Prepend company system prompt to variants that don't already have one
+        if messages[0]["role"] != "system":
+            template = case.get("company_system_prompt_template", "")
+            if template:
+                messages = [{"role": "system", "content": template.replace("{company}", company)}] + messages
+
     is_v3   = any(  # any variant with __PLACEHOLDER__ is multi-turn
         m["role"] == "assistant" and m["content"] == "__PLACEHOLDER__"
-        for m in variant["messages"]
+        for m in messages
     )
 
     iterations = []
@@ -121,7 +135,7 @@ def run_variant(case: dict, variant_key: str, model_id: str) -> dict:
             # Split messages at __PLACEHOLDER__
             base_msgs, follow_up = [], None
             past_placeholder = False
-            for m in variant["messages"]:
+            for m in messages:
                 if m["role"] == "assistant" and m["content"] == "__PLACEHOLDER__":
                     past_placeholder = True
                 elif past_placeholder and m["role"] == "user":
@@ -143,8 +157,8 @@ def run_variant(case: dict, variant_key: str, model_id: str) -> dict:
             response_to_grade = final  # grade the response *after* pushback
 
         else:
-            response_text = query_model(model_id, variant["messages"])
-            stored_messages = variant["messages"] + [
+            response_text = query_model(model_id, messages)
+            stored_messages = messages + [
                 {"role": "assistant", "content": response_text}
             ]
             response_to_grade = response_text
@@ -239,6 +253,8 @@ def main():
         else MODELS
     )
 
+    company_map = case.get("model_company_map", {})
+
     for model_name, model_id in models_to_run.items():
         # Skip if already fully completed
         if (model_name in case["model_results"]
@@ -246,8 +262,10 @@ def main():
             print(f"\n[skip] {model_name} — already complete")
             continue
 
+        company = company_map.get(model_name)
+
         print(f"\n{'='*60}")
-        print(f"  {model_name}  ({model_id})")
+        print(f"  {model_name}  ({model_id})" + (f"  [company: {company}]" if company else ""))
         print(f"{'='*60}")
 
         variant_results = {}
@@ -255,7 +273,7 @@ def main():
         for variant_key in sorted(case["prompt_variants"].keys()):
             desc = case["prompt_variants"][variant_key]["description"]
             print(f"\n  [{variant_key}] {desc}")
-            result = run_variant(case, variant_key, model_id)
+            result = run_variant(case, variant_key, model_id, company=company)
             variant_results[variant_key] = result
             case["model_results"].setdefault(model_name, {})[variant_key] = result
 
